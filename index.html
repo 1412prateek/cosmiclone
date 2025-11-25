@@ -196,19 +196,16 @@
         @media (max-width: 768px) {
             #room-view {
                 grid-template-columns: 1fr;
-                grid-template-rows: 40% 1fr;
-                /* Video on top, rest below */
+                grid-template-rows: auto 1fr auto;
+                /* Video, Users, Controls */
+                height: 100vh;
             }
 
             #theater-container {
                 grid-column: 1 / 2;
                 grid-row: 1 / 2;
-            }
-
-            #control-deck {
-                display: none;
-                /* Hide default controls on mobile, maybe show overlay? For now adhering to grid */
-                /* Re-evaluating based on PRD: "Bottom (60%): Tabbed Drawer" */
+                max-height: 40vh;
+                /* Limit video height */
             }
 
             #sidebar {
@@ -216,6 +213,51 @@
                 grid-row: 2 / 3;
                 border-left: none;
                 border-top: 1px solid #333;
+                overflow-y: auto;
+            }
+
+            #control-deck {
+                grid-column: 1 / 2;
+                grid-row: 3 / 4;
+                display: flex;
+                flex-direction: row;
+                flex-wrap: wrap;
+                gap: 10px;
+                padding: 15px;
+                background-color: var(--surface-color);
+                border-top: 1px solid #333;
+                z-index: 20;
+            }
+
+            /* Mobile Ergonomics */
+            #seek-bar {
+                order: 1;
+                width: 100%;
+                flex-basis: 100%;
+                margin-bottom: 5px;
+            }
+
+            #play-pause-btn {
+                order: 2;
+            }
+
+            #time-display {
+                order: 2;
+            }
+
+            .control-group {
+                order: 2;
+                margin-left: auto;
+                /* Push to right */
+            }
+
+            .btn {
+                padding: 12px 16px;
+                /* Larger touch targets */
+            }
+
+            #mixer-modal {
+                width: 90%;
             }
         }
 
@@ -270,26 +312,6 @@
 
         #offline-overlay h2 {
             margin-bottom: var(--spacing-md);
-        }
-
-        /* Mobile Polish */
-        @media (max-width: 768px) {
-            #control-deck {
-                display: flex;
-                /* Show controls on mobile */
-                flex-wrap: wrap;
-                padding: var(--spacing-sm);
-            }
-
-            .btn {
-                padding: 12px 16px;
-                /* Larger touch targets */
-            }
-
-            #mixer-modal {
-                width: 90%;
-                /* Responsive modal */
-            }
         }
     </style>
 </head>
