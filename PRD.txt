@@ -1,0 +1,117 @@
+Product Requirement Document (PRD)
+Project Name: CosmiClone Watch Party Platform
+Date: November 25, 2025
+Version: 1.0
+Status: Draft
+1. Executive Summary
+Objective: To build a browser-based, synchronized watch-party platform (similar to Cosmi.io) that allows users to watch videos together in real-time while communicating via video/voice chat. The platform must be fully responsive, support local file uploads without screen sharing (synchronized local playback), and feature advanced audio mixing capabilities.
+Target Audience: Friends, long-distance couples, and communities who want to consume media together remotely with a "living room" experience.
+Key Success Metrics:
+Latency: Synchronization drift under 500ms between users.
+Reliability: Successful automatic reconnection after network drops without refreshing.
+Usability: 100% functionality on mobile devices via responsive UI.
+2. Technology Stack
+Frontend Core: HTML5, CSS3 (Flexbox/Grid), Vanilla JavaScript (ES6+).
+Styling: CSS Variables for theming, Media Queries for responsiveness.
+Real-time Database / Signaling: Firebase Firestore (for room state and WebRTC signaling).
+Authentication: Firebase Auth (Anonymous & Persistent).
+Peer-to-Peer Media: WebRTC (for Voice/Video chat and Screen Sharing).
+Hosting: GitHub Pages or Netlify.
+3. Functional Requirements
+3.1. Room Management
+Create Room: Users can generate a unique room ID.
+Join Room: Users can join via a shareable link or by entering a room ID.
+Lobby: A pre-entry screen to check microphone/camera permissions and set a display name.
+3.2. Media Playback & Synchronization
+Supported Sources:
+Direct URLs (mp4, webm).
+Local File Upload: Users can select a file from their device. Note: For the "upload without screen share" feature, the system will prompt all users to select the identical file locally to save bandwidth, synchronizing only the play/pause/seek events.
+Sync Engine:
+Play/Pause: Instant propagation of state to all connected peers.
+Seek: Timeline jumps must synchronize across all users.
+Drift Correction: If a user lags >2 seconds behind the host, the player automatically seeks to the current timestamp.
+3.3. Real-Time Communication (WebRTC)
+Video Chat: Grid view of connected users.
+Screen Sharing:
+Dedicated button to share screen.
+Screen share stream must be treated as a separate video track, distinct from the user's camera.
+Audio Control (The Mixer):
+Mic Toggle: Individual mute/unmute.
+Camera Toggle: Video on/off.
+Push-to-Talk (Optional): Spacebar to unmute temporarily.
+3.4. Advanced Audio Mixing (Critical Requirement)
+Problem: Movie audio often overpowers voice chat.
+Solution: A custom "Audio Mixer" UI component.
+Controls:
+Media Volume Slider: Controls the volume of the movie element (0-100%).
+Voice Volume Slider: Controls the gain of the incoming WebRTC audio tracks (can boost >100% to hear quiet friends).
+Separation: These audio streams must be handled by separate HTMLAudioElements or AudioContext nodes to allow independent volume control.
+3.5. Connectivity & Error Handling
+Heartbeat System:
+The app sends a "pulse" every 5 seconds.
+If internet is lost (offline event), the video automatically pauses.
+UI: A "Reconnecting..." overlay blocks the screen.
+Resume: Once the online event fires, the system resyncs with the host timestamp and resumes playback.
+4. User Interface (UI) & UX Design
+4.1. Layout Strategy
+Desktop (Landscape):
+Left/Center (75%): Main Video Player.
+Right (25%): Collapsible sidebar containing User Grid (WebRTC streams) and Text Chat.
+Bottom: Floating control bar (hover to reveal).
+Mobile/Tablet (Portrait):
+Top (40%): Main Video Player (Sticky).
+Bottom (60%): Tabbed Drawer (Users / Chat / Settings).
+Controls: Touch-friendly, larger hit targets (44px min).
+4.2. Key Components
+The Theater: Container for the video element.
+The Control Deck: * Play/Pause, Seek Bar, Time Display.
+"Mixer" Button (opens audio modal).
+"Upload" Button.
+User Stream Cards:
+Avatar placeholder when camera is off.
+Visual "Green Ring" pulse when the user is speaking.
+Name tag overlay.
+5. Development Phases
+Phase 1: Core Skeleton (Days 1-2)
+Set up HTML5 structure.
+Implement basic CSS layout (Grid/Flexbox).
+Integrate Firebase SDK.
+Implement "Lobby" and Room Creation logic.
+Phase 2: The Sync Engine (Days 3-5)
+Implement Video Player events (play, pause, seeked).
+Connect events to Firestore to update "Room State".
+Implement listeners to react to Firestore changes.
+Milestone: Two browsers can play/pause a video URL in sync.
+Phase 3: Audio/Video & Mixer (Days 6-10)
+Implement WebRTC (using simple-peer or raw RTCPeerConnection).
+Create the UI for the User Grid.
+Build the Mixer: Write JS logic to manipulate the volume properties of the <video> tag and the remote <audio> streams independently.
+Phase 4: Mobile Responsiveness & Polish (Days 11-13)
+Write CSS Media Queries for mobile layouts.
+Implement the "Connection Lost" overlay using window.addEventListener('offline').
+Test on physical mobile devices.
+Phase 5: Deployment & QA (Day 14)
+Deploy to host.
+Stress test sync with 4+ users.
+6. Detailed API / Data Structure (Firestore Schema)
+Collection: rooms/{roomId}
+{
+  "hostId": "user_123",
+  "videoUrl": "[https://example.com/movie.mp4](https://example.com/movie.mp4)",
+  "status": "playing", // or "paused"
+  "currentTime": 145.5,
+  "lastUpdated": 1698776655, // Server timestamp
+  "activeUsers": [
+    {
+      "uid": "user_123",
+      "name": "Alice",
+      "isMuted": false
+    }
+  ]
+}
+
+
+7. Assumptions & Constraints
+Local Files: For the "Upload" feature to work without streaming the file (which is bandwidth-heavy), every user must have the same file on their computer. The app will sync the timing, but load the file from the user's local disk (blob: URL).
+Browser Support: Chrome, Firefox, Safari (Modern versions).
+Turn Servers: For a production WebRTC app (connecting users behind strict firewalls), a TURN server (e.g., Twilio or Coturn) is required. For the MVP, we will rely on public STUN servers.
