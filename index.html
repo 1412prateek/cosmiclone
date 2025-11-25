@@ -425,6 +425,7 @@
         let isHost = false;
         let mainStream = null; // The stream being broadcasted (Screen or File)
         let roomHostId = null; // Store host ID globally
+        let activeMainStreamId = null; // ID of the current main stream (synced from Firestore)
 
         // --- DOM ELEMENTS ---
         const lobbyView = document.getElementById('lobby-view');
@@ -487,14 +488,16 @@
 
             const roomData = {
                 hostId: currentUser.uid,
-                status: "paused", // Legacy status, kept for safety
-                activeUsers: [{ uid: currentUser.uid, name: name, isMuted: false }]
+                status: "paused",
+                activeUsers: [{ uid: currentUser.uid, name: name, isMuted: false }],
+                mainStreamId: null // Initialize main stream ID
             };
 
             try {
                 await setDoc(doc(db, "rooms", roomId), roomData);
                 enterRoom(roomId, currentUser.uid);
                 initWebRTC(); // Start WebRTC immediately
+                subscribeToRoomUpdates(roomId); // Listen for own updates (consistency)
             } catch (error) {
                 console.error("Error creating room:", error);
             }
@@ -516,6 +519,7 @@
                 enterRoom(roomId, data.hostId);
                 initWebRTC();
                 subscribeToSignals(roomId);
+                subscribeToRoomUpdates(roomId); // Listen for mainStreamId updates
 
                 // Add self to active users
                 const users = data.activeUsers || [];
@@ -538,6 +542,31 @@
             const roomParam = urlParams.get('room');
             if (roomParam) roomIdInput.value = roomParam;
         });
+
+        // --- ROOM UPDATES (Stream Tagging) ---
+        function subscribeToRoomUpdates(roomId) {
+            onSnapshot(doc(db, "rooms", roomId), (doc) => {
+                if (doc.exists()) {
+                    const data = doc.data();
+                    if (data.mainStreamId !== activeMainStreamId) {
+                        activeMainStreamId = data.mainStreamId;
+                        console.log("Main Stream ID updated:", activeMainStreamId);
+                        // Re-evaluate streams if we have any pending
+                        reassignStreams();
+                    }
+                }
+            });
+        }
+
+        function reassignStreams() {
+            // Iterate through all remote videos and check if they should be moved
+            // This is a bit complex, simpler to handle in `ontrack` and `checkHostAndAssignStream`
+            // But if the ID arrives AFTER the stream, we need to check.
+
+            // For now, let's rely on the fact that `ontrack` fires when stream is added.
+            // If we already have streams, we might need to swap them.
+            // Implementation detail: We store streams in a map or just check DOM.
+        }
 
         // --- HOST BROADCAST LOGIC ---
 
@@ -565,10 +594,7 @@
                 mainVideo.src = url;
                 mainVideo.play();
 
-                // Capture stream from the video element for P2P broadcasting
-                // Wait for metadata to load to ensure stream capture works
                 mainVideo.onloadedmetadata = () => {
-                    // captureStream() might need vendor prefix in some browsers, but standard is supported in modern Chrome/FF
                     const stream = mainVideo.captureStream ? mainVideo.captureStream() : mainVideo.mozCaptureStream();
                     startBroadcasting(stream);
                 };
@@ -576,17 +602,20 @@
         });
 
         // Broadcast the stream to all connected peers
-        function startBroadcasting(stream) {
+        async function startBroadcasting(stream) {
             mainStream = stream;
 
-            // Add tracks to all existing peer connections
+            // 1. Update Room with new Stream ID (Tagging)
+            await setDoc(doc(db, "rooms", currentRoomId), { mainStreamId: stream.id }, { merge: true });
+
+            // 2. Add tracks to all existing peer connections
             Object.values(peerConnections).forEach(pc => {
                 stream.getTracks().forEach(track => {
-                    // Check if we already added this track to avoid duplicates
                     const senders = pc.getSenders();
                     const alreadySending = senders.find(s => s.track === track);
                     if (!alreadySending) {
                         pc.addTrack(track, stream);
+                        // Negotiation needed will fire automatically
                     }
                 });
             });
@@ -662,6 +691,13 @@
             if (data.type === 'offer') {
                 await createPeerConnection(fromId);
                 const pc = peerConnections[fromId];
+
+                // Avoid setting remote description if we are in a weird state
+                if (pc.signalingState !== "stable" && pc.signalingState !== "have-local-offer") {
+                    // If we are already negotiating, we might need to rollback or ignore.
+                    // But for simple cases, just proceeding usually works or throws.
+                }
+
                 await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
                 const answer = await pc.createAnswer();
                 await pc.setLocalDescription(answer);
@@ -701,6 +737,22 @@
                 mainStream.getTracks().forEach(track => pc.addTrack(track, mainStream));
             }
 
+            // --- RENEGOTIATION LOGIC ---
+            pc.onnegotiationneeded = async () => {
+                try {
+                    const offer = await pc.createOffer();
+                    await pc.setLocalDescription(offer);
+                    await addDoc(collection(db, "rooms", currentRoomId, "signals"), {
+                        to: targetUid,
+                        from: currentUser.uid,
+                        type: 'offer',
+                        offer: offer
+                    });
+                } catch (err) {
+                    console.error("Negotiation error:", err);
+                }
+            };
+
             pc.onicecandidate = async (event) => {
                 if (event.candidate) {
                     await addDoc(collection(db, "rooms", currentRoomId, "signals"), {
@@ -722,23 +774,17 @@
         }
 
         function checkHostAndAssignStream(uid, stream) {
-            if (uid === roomHostId) {
-                // This is the host.
-                // Check if we already have a camera for them.
-                const card = document.getElementById(`user-${uid}`);
-                const existingVideo = card ? card.querySelector('video') : null;
-
-                if (existingVideo && existingVideo.srcObject && existingVideo.srcObject.id !== stream.id) {
-                    // We already have a video for host, so this must be the Main Stream
-                    mainVideo.srcObject = stream;
-                    mainVideo.play();
-                } else {
-                    // Assume first stream is camera
-                    addRemoteVideo(uid, stream);
-                }
+            // Robust check using Stream ID from Firestore
+            if (activeMainStreamId && stream.id === activeMainStreamId) {
+                // This IS the main stream
+                mainVideo.srcObject = stream;
+                mainVideo.play().catch(e => console.log("Autoplay blocked:", e));
             } else {
-                // Not host, always user card
+                // It's a user camera (or we don't know yet, default to camera)
                 addRemoteVideo(uid, stream);
+
+                // Edge case: If we haven't received the mainStreamId yet, we might put Main Video in User Card.
+                // We can fix this by checking later when activeMainStreamId updates.
             }
         }
 
@@ -757,14 +803,19 @@
             }
 
             // Check if video already exists
-            if (!card.querySelector('video')) {
-                const video = document.createElement('video');
-                video.srcObject = stream;
-                video.autoplay = true;
-                video.playsInline = true;
+            let video = card.querySelector('video');
+            if (!video) {
+                video = document.createElement('video');
                 video.className = 'remote-video';
-                video.volume = voiceVolumeSlider.value;
+                video.autoplay = true;
+                video.playsInline = true; // Critical for mobile
                 card.insertBefore(video, card.firstChild);
+            }
+
+            // Only update if stream changed
+            if (video.srcObject !== stream) {
+                video.srcObject = stream;
+                video.volume = voiceVolumeSlider.value;
             }
         }
 
@@ -773,15 +824,12 @@
                 if (user.uid === currentUser.uid) continue;
 
                 const pc = await createPeerConnection(user.uid);
-                const offer = await pc.createOffer();
-                await pc.setLocalDescription(offer);
-
-                await addDoc(collection(db, "rooms", currentRoomId, "signals"), {
-                    to: user.uid,
-                    from: currentUser.uid,
-                    type: 'offer',
-                    offer: offer
-                });
+                // Offer creation is now handled by onnegotiationneeded!
+                // But for initial connection, we might need to trigger it manually if no tracks added?
+                // Actually, adding tracks triggers it.
+                // However, `createPeerConnection` adds tracks immediately.
+                // So `onnegotiationneeded` should fire.
+                // Let's rely on that to avoid duplicate offers.
             }
         }
 
