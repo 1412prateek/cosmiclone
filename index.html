@@ -224,6 +224,39 @@
                 flex-wrap: wrap;
                 gap: 10px;
                 padding: 15px;
+                background-color: var(--surface-color);
+                border-top: 1px solid #333;
+                z-index: 20;
+            }
+
+            /* Mobile Ergonomics */
+            #seek-bar {
+                order: 1;
+                width: 100%;
+                flex-basis: 100%;
+                margin-bottom: 10px;
+            }
+
+            #play-pause-btn {
+                order: 2;
+            }
+
+            #time-display {
+                order: 2;
+                margin-left: 10px;
+            }
+
+            .control-group {
+                order: 3;
+                width: 100%;
+                justify-content: center;
+                margin-top: 10px;
+                margin-left: 0;
+            }
+
+            .btn {
+                padding: 12px 16px;
+                /* Larger touch targets */
             }
 
             #mixer-modal {
@@ -314,17 +347,22 @@
     <!-- ROOM VIEW -->
     <div id="room-view" class="hidden">
         <div id="theater-container">
-            <video id="main-video" controls>
-                <source src="https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
-                    type="video/mp4">
-                Your browser does not support the video tag.
-            </video>
+            <!-- Removed default src -->
+            <video id="main-video" controls playsinline></video>
         </div>
 
         <div id="control-deck">
             <button class="btn btn-secondary" id="play-pause-btn">Play</button>
             <input type="range" id="seek-bar" class="flex-grow" value="0" min="0" max="100">
             <span id="time-display">00:00 / 00:00</span>
+
+            <!-- Host Controls (Hidden by default) -->
+            <div id="host-controls" class="hidden" style="display: flex; gap: 8px;">
+                <button class="btn btn-primary" id="share-screen-btn">Share Screen</button>
+                <button class="btn btn-primary" id="upload-video-btn">Upload Video</button>
+                <input type="file" id="file-input" accept="video/*" hidden>
+            </div>
+
             <div class="control-group">
                 <button class="btn btn-secondary" id="mic-btn">Mic On</button>
                 <button class="btn btn-secondary" id="cam-btn">Cam On</button>
@@ -367,7 +405,6 @@
         import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/9.22.0/firebase-auth.js";
 
         // --- CONFIGURATION ---
-        // Replace with your actual Firebase project config
         const firebaseConfig = {
             apiKey: "AIzaSyA5OQr1ZKHYS24ftvPksa3rV8RdnIU4xlU",
             authDomain: "video-calling-49b53.firebaseapp.com",
@@ -378,7 +415,6 @@
             measurementId: "G-ESB4LZ89FW"
         };
 
-        // Initialize Firebase
         const app = initializeApp(firebaseConfig);
         const db = getFirestore(app);
         const auth = getAuth(app);
@@ -386,6 +422,9 @@
         // --- STATE ---
         let currentUser = null;
         let currentRoomId = null;
+        let isHost = false;
+        let mainStream = null; // The stream being broadcasted (Screen or File)
+        let roomHostId = null; // Store host ID globally
 
         // --- DOM ELEMENTS ---
         const lobbyView = document.getElementById('lobby-view');
@@ -396,25 +435,38 @@
         const roomIdInput = document.getElementById('room-id-input');
         const currentRoomIdDisplay = document.getElementById('current-room-id');
 
+        const mainVideo = document.getElementById('main-video');
+        const playPauseBtn = document.getElementById('play-pause-btn');
+        const seekBar = document.getElementById('seek-bar');
+        const timeDisplay = document.getElementById('time-display');
+
+        const hostControls = document.getElementById('host-controls');
+        const shareScreenBtn = document.getElementById('share-screen-btn');
+        const uploadVideoBtn = document.getElementById('upload-video-btn');
+        const fileInput = document.getElementById('file-input');
+
         // --- FUNCTIONS ---
 
-        // Generate a random 6-character Room ID
         function generateRoomId() {
             return Math.random().toString(36).substring(2, 8).toUpperCase();
         }
 
-        // Switch to Room View
-        function enterRoom(roomId) {
+        function enterRoom(roomId, hostId) {
+            roomHostId = hostId;
             lobbyView.classList.add('hidden');
             roomView.classList.remove('hidden');
             currentRoomId = roomId;
             currentRoomIdDisplay.textContent = roomId;
 
-            // Update URL for easy sharing (optional, doesn't reload)
+            isHost = (currentUser.uid === hostId);
+            if (isHost) {
+                hostControls.classList.remove('hidden');
+                hostControls.style.display = 'flex'; // Ensure flex layout
+            }
+
             window.history.pushState({ roomId }, '', `?room=${roomId}`);
         }
 
-        // Initialize User
         async function initUser() {
             try {
                 const userCredential = await signInAnonymously(auth);
@@ -426,51 +478,33 @@
             }
         }
 
-        // Create Room Logic
         async function createRoom() {
             const name = displayNameInput.value.trim();
-            if (!name) {
-                alert("Please enter a display name.");
-                return;
-            }
+            if (!name) { alert("Please enter a display name."); return; }
 
             await initUser();
             const roomId = generateRoomId();
 
-            // Initial Room State (per PRD Schema)
             const roomData = {
                 hostId: currentUser.uid,
-                videoUrl: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
-                status: "paused",
-                currentTime: 0,
-                lastUpdated: Date.now(),
-                activeUsers: [
-                    {
-                        uid: currentUser.uid,
-                        name: name,
-                        isMuted: false
-                    }
-                ]
+                status: "paused", // Legacy status, kept for safety
+                activeUsers: [{ uid: currentUser.uid, name: name, isMuted: false }]
             };
 
             try {
                 await setDoc(doc(db, "rooms", roomId), roomData);
-                enterRoom(roomId);
+                enterRoom(roomId, currentUser.uid);
+                initWebRTC(); // Start WebRTC immediately
             } catch (error) {
                 console.error("Error creating room:", error);
-                alert("Failed to create room. Check console/config.");
             }
         }
 
-        // Join Room Logic
         async function joinRoom() {
             const name = displayNameInput.value.trim();
             const roomId = roomIdInput.value.trim().toUpperCase();
 
-            if (!name || !roomId) {
-                alert("Please enter a display name and Room ID.");
-                return;
-            }
+            if (!name || !roomId) { alert("Please enter a display name and Room ID."); return; }
 
             await initUser();
 
@@ -478,130 +512,84 @@
             const roomSnap = await getDoc(roomRef);
 
             if (roomSnap.exists()) {
-                enterRoom(roomId);
+                const data = roomSnap.data();
+                enterRoom(roomId, data.hostId);
+                initWebRTC();
+                subscribeToSignals(roomId);
+
+                // Add self to active users
+                const users = data.activeUsers || [];
+                if (!users.find(u => u.uid === currentUser.uid)) {
+                    users.push({ uid: currentUser.uid, name: name, isMuted: false });
+                    await setDoc(roomRef, { activeUsers: users }, { merge: true });
+                }
+
+                initiateCalls(users);
             } else {
                 alert("Room not found!");
             }
         }
 
-        // --- EVENT LISTENERS ---
         createRoomBtn.addEventListener('click', createRoom);
         joinRoomBtn.addEventListener('click', joinRoom);
 
-        // Check URL params for room ID on load
         window.addEventListener('DOMContentLoaded', () => {
             const urlParams = new URLSearchParams(window.location.search);
             const roomParam = urlParams.get('room');
-            if (roomParam) {
-                roomIdInput.value = roomParam;
-            }
+            if (roomParam) roomIdInput.value = roomParam;
         });
 
-        // --- SYNC ENGINE ---
-        const mainVideo = document.getElementById('main-video');
-        const playPauseBtn = document.getElementById('play-pause-btn');
-        const seekBar = document.getElementById('seek-bar');
-        const timeDisplay = document.getElementById('time-display');
+        // --- HOST BROADCAST LOGIC ---
 
-        let isRemoteUpdate = false; // Flag to prevent infinite loops
-        let unsubscribeRoom = null;
-
-        // Update Room State in Firestore
-        async function updateRoomState(data) {
-            if (!currentRoomId) return;
+        // 1. Share Screen
+        shareScreenBtn.addEventListener('click', async () => {
             try {
-                // Merge with existing data, always update lastUpdated
-                await setDoc(doc(db, "rooms", currentRoomId), {
-                    ...data,
-                    lastUpdated: Date.now()
-                }, { merge: true });
-            } catch (error) {
-                console.error("Error updating room state:", error);
+                const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+                startBroadcasting(stream);
+
+                // Show locally
+                mainVideo.srcObject = stream;
+                mainVideo.play();
+            } catch (err) {
+                console.error("Error sharing screen:", err);
             }
-        }
+        });
 
-        // Subscribe to Room Updates
-        function subscribeToRoom(roomId) {
-            if (unsubscribeRoom) unsubscribeRoom();
+        // 2. Upload Video
+        uploadVideoBtn.addEventListener('click', () => fileInput.click());
 
-            unsubscribeRoom = onSnapshot(doc(db, "rooms", roomId), (doc) => {
-                if (!doc.exists()) return;
-                const data = doc.data();
-                handleRemoteUpdate(data);
+        fileInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                const url = URL.createObjectURL(file);
+                mainVideo.src = url;
+                mainVideo.play();
+
+                // Capture stream from the video element for P2P broadcasting
+                // Wait for metadata to load to ensure stream capture works
+                mainVideo.onloadedmetadata = () => {
+                    // captureStream() might need vendor prefix in some browsers, but standard is supported in modern Chrome/FF
+                    const stream = mainVideo.captureStream ? mainVideo.captureStream() : mainVideo.mozCaptureStream();
+                    startBroadcasting(stream);
+                };
+            }
+        });
+
+        // Broadcast the stream to all connected peers
+        function startBroadcasting(stream) {
+            mainStream = stream;
+
+            // Add tracks to all existing peer connections
+            Object.values(peerConnections).forEach(pc => {
+                stream.getTracks().forEach(track => {
+                    // Check if we already added this track to avoid duplicates
+                    const senders = pc.getSenders();
+                    const alreadySending = senders.find(s => s.track === track);
+                    if (!alreadySending) {
+                        pc.addTrack(track, stream);
+                    }
+                });
             });
-        }
-
-        // Handle Remote Updates (The Core Sync Logic)
-        function handleRemoteUpdate(data) {
-            // 1. Sync Play/Pause Status
-            if (data.status === 'playing' && mainVideo.paused) {
-                isRemoteUpdate = true;
-                mainVideo.play().catch(e => console.log("Autoplay blocked:", e));
-            } else if (data.status === 'paused' && !mainVideo.paused) {
-                isRemoteUpdate = true;
-                mainVideo.pause();
-            }
-
-            // 2. Sync Time (Drift Correction)
-            // Only sync time if the difference is significant (> 2 seconds) to avoid stuttering
-            const timeDiff = Math.abs(mainVideo.currentTime - data.currentTime);
-            if (timeDiff > 2) {
-                isRemoteUpdate = true;
-                mainVideo.currentTime = data.currentTime;
-            }
-
-            // Update UI
-            updateControlsUI();
-        }
-
-        // Local Video Event Listeners
-        mainVideo.addEventListener('play', () => {
-            if (isRemoteUpdate) { isRemoteUpdate = false; return; }
-            updateRoomState({ status: 'playing', currentTime: mainVideo.currentTime });
-            updateControlsUI();
-        });
-
-        mainVideo.addEventListener('pause', () => {
-            if (isRemoteUpdate) { isRemoteUpdate = false; return; }
-            updateRoomState({ status: 'paused', currentTime: mainVideo.currentTime });
-            updateControlsUI();
-        });
-
-        mainVideo.addEventListener('seeked', () => {
-            if (isRemoteUpdate) { isRemoteUpdate = false; return; }
-            updateRoomState({ currentTime: mainVideo.currentTime });
-        });
-
-        // UI Updates
-        function updateControlsUI() {
-            playPauseBtn.textContent = mainVideo.paused ? 'Play' : 'Pause';
-        }
-
-        mainVideo.addEventListener('timeupdate', () => {
-            const value = (mainVideo.currentTime / mainVideo.duration) * 100;
-            seekBar.value = value || 0;
-
-            // Format Time
-            const current = formatTime(mainVideo.currentTime);
-            const total = formatTime(mainVideo.duration);
-            timeDisplay.textContent = `${current} / ${total}`;
-        });
-
-        seekBar.addEventListener('input', () => {
-            const time = (seekBar.value / 100) * mainVideo.duration;
-            mainVideo.currentTime = time;
-        });
-
-        playPauseBtn.addEventListener('click', () => {
-            if (mainVideo.paused) mainVideo.play();
-            else mainVideo.pause();
-        });
-
-        function formatTime(seconds) {
-            if (!seconds) return "00:00";
-            const m = Math.floor(seconds / 60);
-            const s = Math.floor(seconds % 60);
-            return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
         }
 
         // --- WEBRTC & MIXER ---
@@ -615,7 +603,7 @@
         const userGrid = document.getElementById('user-grid');
 
         let localStream = null;
-        let peerConnections = {}; // uid -> RTCPeerConnection
+        let peerConnections = {};
         const iceServers = {
             iceServers: [
                 { urls: 'stun:stun1.l.google.com:19302' },
@@ -623,29 +611,27 @@
             ]
         };
 
-        // Initialize WebRTC
         async function initWebRTC() {
             try {
                 localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
                 addLocalVideo(localStream);
             } catch (error) {
                 console.error("Error accessing media devices:", error);
-                alert("Camera/Mic access denied. You won't be able to join the chat.");
+                alert("Camera/Mic access denied.");
             }
         }
 
         function addLocalVideo(stream) {
-            // Find "You" card and replace placeholder
             const cards = userGrid.getElementsByClassName('user-card');
             for (let card of cards) {
                 if (card.querySelector('.user-name').textContent === 'You') {
                     const video = document.createElement('video');
                     video.srcObject = stream;
-                    video.muted = true; // Mute local video to prevent feedback
+                    video.muted = true;
                     video.autoplay = true;
                     video.playsInline = true;
-                    video.className = 'remote-video'; // Reuse class
-                    card.innerHTML = ''; // Clear placeholder
+                    video.className = 'remote-video';
+                    card.innerHTML = '';
                     card.appendChild(video);
                     const nameTag = document.createElement('span');
                     nameTag.className = 'user-name';
@@ -656,10 +642,8 @@
             }
         }
 
-        // Signaling: Subscribe to messages
         function subscribeToSignals(roomId) {
             const signalsRef = collection(db, "rooms", roomId, "signals");
-            // Listen for signals where 'to' == currentUser.uid
             const q = query(signalsRef, where("to", "==", currentUser.uid));
 
             onSnapshot(q, (snapshot) => {
@@ -701,19 +685,22 @@
             }
         }
 
-        // Create Peer Connection
         async function createPeerConnection(targetUid) {
             if (peerConnections[targetUid]) return peerConnections[targetUid];
 
             const pc = new RTCPeerConnection(iceServers);
             peerConnections[targetUid] = pc;
 
-            // Add local tracks
+            // Add local camera tracks
             if (localStream) {
                 localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
             }
 
-            // Handle ICE Candidates
+            // If Host, also add Main Stream tracks if active
+            if (isHost && mainStream) {
+                mainStream.getTracks().forEach(track => pc.addTrack(track, mainStream));
+            }
+
             pc.onicecandidate = async (event) => {
                 if (event.candidate) {
                     await addDoc(collection(db, "rooms", currentRoomId, "signals"), {
@@ -725,13 +712,34 @@
                 }
             };
 
-            // Handle Remote Stream
+            // Handle Incoming Streams
             pc.ontrack = (event) => {
                 const stream = event.streams[0];
-                addRemoteVideo(targetUid, stream);
+                checkHostAndAssignStream(targetUid, stream);
             };
 
             return pc;
+        }
+
+        function checkHostAndAssignStream(uid, stream) {
+            if (uid === roomHostId) {
+                // This is the host.
+                // Check if we already have a camera for them.
+                const card = document.getElementById(`user-${uid}`);
+                const existingVideo = card ? card.querySelector('video') : null;
+
+                if (existingVideo && existingVideo.srcObject && existingVideo.srcObject.id !== stream.id) {
+                    // We already have a video for host, so this must be the Main Stream
+                    mainVideo.srcObject = stream;
+                    mainVideo.play();
+                } else {
+                    // Assume first stream is camera
+                    addRemoteVideo(uid, stream);
+                }
+            } else {
+                // Not host, always user card
+                addRemoteVideo(uid, stream);
+            }
         }
 
         function addRemoteVideo(uid, stream) {
@@ -755,13 +763,11 @@
                 video.autoplay = true;
                 video.playsInline = true;
                 video.className = 'remote-video';
-                // Apply current voice volume
                 video.volume = voiceVolumeSlider.value;
                 card.insertBefore(video, card.firstChild);
             }
         }
 
-        // Initiate Call (Called when joining)
         async function initiateCalls(activeUsers) {
             for (let user of activeUsers) {
                 if (user.uid === currentUser.uid) continue;
@@ -789,10 +795,9 @@
 
         voiceVolumeSlider.addEventListener('input', (e) => {
             const vol = e.target.value;
-            // Update all remote videos
             document.querySelectorAll('.remote-video').forEach(video => {
-                if (video !== localStream) { // Don't change local video (it's muted anyway)
-                    video.volume = Math.min(1, vol); // HTML video volume is 0-1
+                if (video !== localStream) {
+                    video.volume = Math.min(1, vol);
                 }
             });
         });
@@ -818,21 +823,6 @@
             else camBtn.style.backgroundColor = 'var(--secondary-color)';
         });
 
-        // Update enterRoom to init WebRTC
-        const prevEnterRoom = enterRoom;
-        enterRoom = async function (roomId) {
-            prevEnterRoom(roomId);
-            await initWebRTC();
-            subscribeToSignals(roomId);
-
-            // Fetch active users to initiate calls
-            const roomSnap = await getDoc(doc(db, "rooms", roomId));
-            if (roomSnap.exists()) {
-                const users = roomSnap.data().activeUsers || [];
-                initiateCalls(users);
-            }
-        };
-
         // --- OFFLINE HANDLING ---
         const offlineOverlay = document.getElementById('offline-overlay');
 
@@ -844,6 +834,30 @@
         window.addEventListener('online', () => {
             offlineOverlay.classList.add('hidden');
         });
+
+        // --- LOCAL PLAYBACK CONTROLS ---
+        playPauseBtn.addEventListener('click', () => {
+            if (mainVideo.paused) mainVideo.play();
+            else mainVideo.pause();
+        });
+
+        mainVideo.addEventListener('timeupdate', () => {
+            const value = (mainVideo.currentTime / mainVideo.duration) * 100;
+            seekBar.value = value || 0;
+            timeDisplay.textContent = `${formatTime(mainVideo.currentTime)} / ${formatTime(mainVideo.duration)}`;
+        });
+
+        seekBar.addEventListener('input', () => {
+            const time = (seekBar.value / 100) * mainVideo.duration;
+            mainVideo.currentTime = time;
+        });
+
+        function formatTime(seconds) {
+            if (!seconds) return "00:00";
+            const m = Math.floor(seconds / 60);
+            const s = Math.floor(seconds % 60);
+            return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+        }
     </script>
 </body>
 
